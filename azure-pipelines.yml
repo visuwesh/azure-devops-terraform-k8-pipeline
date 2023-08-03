@@ -10,10 +10,9 @@ pool:
   vmImage: ubuntu-latest
 
 steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+- script: echo Hello, azure devops project!
+  displayName: 'Run two script'
 
 - script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
+    echo "basic CI/CD pipeline"
   displayName: 'Run a multi-line script'
