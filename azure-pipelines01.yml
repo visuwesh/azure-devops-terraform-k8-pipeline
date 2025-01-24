@@ -1,0 +1,142 @@
+trigger:
+  branches:
+    include:
+      - main  # Trigger the pipeline on pushes to the main branch
+
+variables:
+  # General configuration
+  JAVA_VERSION: '11'
+  MAVEN_CMD: 'mvn clean package -DskipTests=true'
+  JAR_FILE: target/todoapp.jar
+  # Docker and Container Registry
+  DOCKER_IMAGE_NAME: todoapp
+  DOCKER_TAG: $(Build.BuildId)
+  DOCKER_REGISTRY: yourdockerhubusername  # Replace with your Docker Hub username or ACR name
+  # Kubernetes
+  KUBE_NAMESPACE: todoapp-namespace
+  KUBE_MANIFEST_PATH: k8s/deployment.yaml
+  # Artifactory (Optional)
+  ARTIFACTORY_URL: https://yourjfrogdomain.jfrog.io/artifactory
+  ARTIFACTORY_REPO: your-artifactory-repo
+  ARTIFACTORY_USERNAME: $(JFROG_USERNAME)  # Stored in Azure DevOps secrets
+  ARTIFACTORY_PASSWORD: $(JFROG_PASSWORD)  # Stored in Azure DevOps secrets
+
+stages:
+  - stage: Checkout
+    displayName: Checkout Code
+    jobs:
+      - job: Checkout_Job
+        displayName: Checkout Source Code
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: Checkout@1
+            displayName: Checkout Repository
+
+  - stage: Build
+    displayName: Build with Maven
+    dependsOn: Checkout
+    jobs:
+      - job: Build_Job
+        displayName: Build Java Application
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: UseJavaVersion@1
+            inputs:
+              versionSpec: $(JAVA_VERSION)
+              jdkArchitecture: 'x64'
+
+          - script: |
+              echo "Building the application with Maven..."
+              $(MAVEN_CMD)
+            displayName: Build with Maven
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(JAR_FILE)'
+              artifact: 'todoapp-jar'
+            displayName: Publish JAR File as Pipeline Artifact
+
+  - stage: StoreArtifact
+    displayName: Store JAR in Artifactory
+    dependsOn: Build
+    jobs:
+      - job: Artifactory_Job
+        displayName: Upload JAR to Artifactory
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'todoapp-jar'
+              targetPath: './'
+            displayName: Download JAR File
+
+          - script: |
+              echo "Uploading the JAR file to JFrog Artifactory..."
+              curl -u$(ARTIFACTORY_USERNAME):$(ARTIFACTORY_PASSWORD) -T $(JAR_FILE) $(ARTIFACTORY_URL)/$(ARTIFACTORY_REPO)/$(Build.BuildId)/todoapp.jar
+            displayName: Upload JAR to JFrog Artifactory
+
+  - stage: BuildDockerImage
+    displayName: Build Docker Image and Push
+    dependsOn: StoreArtifact
+    jobs:
+      - job: Docker_Job
+        displayName: Build and Push Docker Image
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: Docker@2
+            displayName: Login to Docker Registry
+            inputs:
+              command: login
+              containerRegistry: $(DOCKER_REGISTRY)
+              username: $(DOCKER_USERNAME)  # Stored in Azure DevOps secrets
+              password: $(DOCKER_PASSWORD)  # Stored in Azure DevOps secrets
+
+          - task: Docker@2
+            displayName: Build and Tag Docker Image
+            inputs:
+              command: build
+              dockerfile: 'Dockerfile'
+              tags: |
+                $(DOCKER_TAG)
+              buildContext: $(System.DefaultWorkingDirectory)
+
+          - task: Docker@2
+            displayName: Push Docker Image
+            inputs:
+              command: push
+              tags: |
+                $(DOCKER_TAG)
+
+  - stage: Deploy
+    displayName: Deploy to Kubernetes
+    dependsOn: BuildDockerImage
+    jobs:
+      - job: Deploy_Job
+        displayName: Deploy to Kubernetes
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              echo "Setting up kubectl..."
+              az aks get-credentials --resource-group $(KUBE_RESOURCE_GROUP) --name $(KUBE_CLUSTER_NAME) --overwrite-existing
+            displayName: Configure kubectl
+
+          - script: |
+              echo "Creating namespace if not exists..."
+              kubectl create namespace $(KUBE_NAMESPACE) || true
+            displayName: Create Kubernetes Namespace
+
+          - task: Kubernetes@1
+            displayName: Apply Kubernetes Manifests
+            inputs:
+              connectionType: 'Azure Resource Manager'
+              azureSubscription: 'Your Azure Subscription'  # Replace with your subscription
+              kubernetesCluster: $(KUBE_CLUSTER_NAME)
+              namespace: $(KUBE_NAMESPACE)
+              command: apply
+              useConfigurationFile: true
+              configuration: $(System.DefaultWorkingDirectory)/$(KUBE_MANIFEST_PATH)
